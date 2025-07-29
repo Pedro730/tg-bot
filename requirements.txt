@@ -1,0 +1,5 @@
+python-telegram-bot==20.*  
+python-dotenv  
+sqlalchemy  
+python-docx  
+flask
