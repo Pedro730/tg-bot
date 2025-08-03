@@ -118,11 +118,26 @@ def rewrite_data_docx():
     doc.save(DATA_FILE)
     CHECKSUM_FILE.write_text(_file_checksum(DATA_FILE))
 
-def _notify_all_approved(app: Application, new_keys: list[str]):
+def _notify_all_approved(app: Application, keys: list[str], action: str):
+    """
+    Отправляет уведомления всем одобренным пользователям.
+    action: 'added', 'edited', 'deleted'
+    """
+    if action not in {"added", "edited", "deleted"}:
+        logger.warning(f"Неверный action: {action}")
+        return
+
     with SessionLocal() as session:
         users = session.query(UserRecord).filter_by(status="approved").all()
-    for key in new_keys:
-        msg = f"🔔 <b>Добавлена новая запись:</b>\n\n<b>{key.capitalize()}</b>\n{DATA[key]}"
+
+    for key in keys:
+        if action == "deleted":
+            msg = f"🔔 <b>Удалена запись:</b>\n\n<b>{key.capitalize()}</b>"
+        else:
+            desc = DATA.get(key, "Описание недоступно")
+            action_text = "Добавлена новая запись" if action == "added" else "Обновлена запись"
+            msg = f"🔔 <b>{action_text}:</b>\n\n<b>{key.capitalize()}</b>\n{desc}"
+
         for user in users:
             try:
                 app.bot.send_message(chat_id=user.user_id, text=msg, parse_mode="HTML")
@@ -137,7 +152,7 @@ def reload_data_and_notify_if_new(app: Application):
     DATA.update(new_data)
     if new_keys:
         logger.info(f"Обнаружены новые ключи: {new_keys}")
-        _notify_all_approved(app, new_keys)
+        _notify_all_approved(app, new_keys, "added")
 
 DATA = load_data(DATA_FILE)
 rewrite_data_docx()
@@ -170,7 +185,7 @@ async def add_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     desc = update.message.text.strip()
     DATA[key] = desc
     rewrite_data_docx()
-    _notify_all_approved(context.application, [key])
+    _notify_all_approved(context.application, [key], "added")
     await update.message.reply_text(f"✅ Добавлено:\n<b>{key}</b>\n{desc}", parse_mode="HTML")
     context.user_data.clear()
     return ConversationHandler.END
@@ -196,7 +211,7 @@ async def edit_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     desc = update.message.text.strip()
     DATA[key] = desc
     rewrite_data_docx()
-    _notify_all_approved(context.application, [key])
+    _notify_all_approved(context.application, [key], "edited")
     await update.message.reply_text(f"✅ Обновлено:\n<b>{key}</b>\n{desc}", parse_mode="HTML")
     context.user_data.clear()
     return ConversationHandler.END
@@ -213,10 +228,15 @@ async def del_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if key not in DATA:
         await update.message.reply_text("❌ Запись не найдена.")
         return ConversationHandler.END
+
+    deleted_key = key
     del DATA[key]
     rewrite_data_docx()
-    _notify_all_approved(context.application, [key])
-    await update.message.reply_text(f"✅ Удалено: <b>{key}</b>", parse_mode="HTML")
+    _notify_all_approved(context.application, [deleted_key], "deleted")
+    await update.message.reply_text(
+        f"✅ Запись удалена и уведомления отправлены:\n\n<b>{deleted_key}</b>",
+        parse_mode="HTML"
+    )
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -254,13 +274,13 @@ async def broadcast_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(chat_id=user.user_id, text=text, parse_mode="HTML")
             sent += 1
-            await asyncio.sleep(0.1)  # избегаем rate limit
+            await asyncio.sleep(0.1)
         except Exception as e:
             logger.warning(f"Не дошло до {user.user_id}: {e}")
     await update.message.reply_text(f"✅ Рассылка завершена. Отправлено: {sent}")
     return ConversationHandler.END
 
-# ---------- РУЧНОЕ ДОБАВЛЕНИЕ ОДНОГО ПОЛЬЗОВАТЕЛЯ ----------
+# ---------- ДОБАВЛЕНИЕ ПОЛЬЗОВАТЕЛЕЙ ----------
 async def adduser(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -281,7 +301,6 @@ async def adduser(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session.commit()
     await update.message.reply_text(f"✅ Пользователь {user_id} добавлен и одобрен.")
 
-# ---------- ДОБАВЛЕНИЕ НЕСКОЛЬКИХ ПОЛЬЗОВАТЕЛЕЙ ----------
 async def addusers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -460,6 +479,8 @@ async def list_entries(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def list_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    if query.from_user.id != ADMIN_ID:
+        return
     cmd, key = query.data.split("_", 1)
     if cmd == "e":
         context.user_data["edit_key"] = key
@@ -468,10 +489,14 @@ async def list_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return EDIT_DESC
     elif cmd == "d":
+        deleted_key = key
         del DATA[key]
         rewrite_data_docx()
-        _notify_all_approved(context.application, [key])
-        await query.edit_message_text(f"✅ Удалено: <b>{key}</b>", parse_mode="HTML")
+        _notify_all_approved(context.application, [deleted_key], "deleted")
+        await query.edit_message_text(
+            f"✅ Запись удалена и уведомления отправлены:\n\n<b>{deleted_key}</b>",
+            parse_mode="HTML"
+        )
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
