@@ -581,7 +581,7 @@ def main():
     application.add_handler(CommandHandler("users", users_command, filters=filters.User(user_id=ADMIN_ID)))
     application.add_handler(CommandHandler("history", history_command, filters=filters.User(user_id=ADMIN_ID)))
     application.add_handler(CommandHandler("stats", stats_command, filters=filters.User(user_id=ADMIN_ID)))
-    application.add_handler(CommandCommand("list", list_entries, filters=filters.User(user_id=ADMIN_ID)))
+    application.add_handler(CommandHandler("list", list_entries, filters=filters.User(user_id=ADMIN_ID)))
     application.add_handler(conv_add)
     application.add_handler(conv_edit)
     application.add_handler(conv_del)
