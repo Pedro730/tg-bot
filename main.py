@@ -2,16 +2,17 @@
 import os
 import logging
 import datetime
+import random
 from pathlib import Path
 
 from docx import Document
 from sqlalchemy import create_engine, Column, Integer, String, DateTime
 from sqlalchemy.orm import declarative_base, sessionmaker
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters,
-    ContextTypes, CallbackQueryHandler
+    ContextTypes, CallbackQueryHandler, ConversationHandler
 )
 from telegram.helpers import escape
 
@@ -116,14 +117,27 @@ logger.info("Загружено %d записей", len(DATA))
 # -------------------------------------------------
 # Утилиты
 # -------------------------------------------------
+def rewrite_data_docx():
+    doc = Document()
+    for key, desc in DATA.items():
+        doc.add_paragraph(f"Ключевое слово: {key}")
+        doc.add_paragraph(f"Описание: {desc}")
+    doc.save(DATA_FILE)
+
 def is_approved(user_id: int) -> bool:
     with SessionLocal() as session:
         user = session.query(UserRecord).filter_by(user_id=user_id).first()
         return bool(user and user.status == "approved")
 
 # -------------------------------------------------
+# Conversation states
+# -------------------------------------------------
+ADD_KEY, ADD_DESC, EDIT_KEY, EDIT_DESC, DELETE_KEY = range(5)
+
+# -------------------------------------------------
 # Хэндлеры
 # -------------------------------------------------
+# --- /start ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     with SessionLocal() as session:
@@ -161,6 +175,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text("📨 Ваша заявка отправлена администратору.")
 
+# --- approve callback ---
 async def approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -186,6 +201,7 @@ async def approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.warning(f"Не удалось уведомить пользователя {user_id}: {e}")
 
+# --- /users ---
 async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -213,6 +229,7 @@ async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
+# --- toggle user status ---
 async def toggle_user_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -244,6 +261,48 @@ async def toggle_user_status(update: Update, context: ContextTypes.DEFAULT_TYPE)
         except Exception as e:
             logger.warning(f"Не удалось уведомить пользователя {user_id}: {e}")
 
+# --- /history ---
+async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    with SessionLocal() as session:
+        records = session.query(SearchHistory).order_by(SearchHistory.timestamp.desc()).limit(50).all()
+        if not records:
+            await update.message.reply_text("📭 История поиска пуста.")
+            return
+
+        lines = [
+            f"{r.timestamp.strftime('%Y-%m-%d %H:%M')} — @{escape(r.username or 'N/A')} — <code>{escape(r.query)}</code>"
+            for r in records
+        ]
+        await update.message.reply_text(
+            "📋 История поиска (последние 50):\n\n" + "\n".join(lines),
+            parse_mode="HTML"
+        )
+
+# --- /stats ---
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    with SessionLocal() as session:
+        total_users = session.query(UserRecord).count()
+        approved_users = session.query(UserRecord).filter_by(status="approved").count()
+        total_searches = session.query(SearchHistory).count()
+        today_searches = session.query(SearchHistory).filter(
+            SearchHistory.timestamp >= datetime.datetime.utcnow().date()
+        ).count()
+
+    await update.message.reply_text(
+        f"📊 Статистика:\n\n"
+        f"👥 Всего пользователей: {total_users}\n"
+        f"✅ Одобрено: {approved_users}\n"
+        f"🔍 Всего поисков: {total_searches}\n"
+        f"📅 За сегодня: {today_searches}"
+    )
+
+# --- handle_message ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if not is_approved(update.effective_user.id):
@@ -255,7 +314,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("🔍 Пустой запрос.")
             return
 
-        # -------------- Логируем запрос --------------
         with SessionLocal() as session:
             session.add(SearchHistory(
                 user_id=update.effective_user.id,
@@ -263,7 +321,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 query=query
             ))
             session.commit()
-        # ---------------------------------------------
 
         matches = [
             (k, v) for k, v in DATA.items()
@@ -284,44 +341,117 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Ошибка в handle_message: %s", e)
         await update.message.reply_text("⚠️ Произошла ошибка, попробуйте позже.")
 
-async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-
-    with SessionLocal() as session:
-        records = session.query(SearchHistory).order_by(SearchHistory.timestamp.desc()).limit(50).all()
-        if not records:
-            await update.message.reply_text("📭 История поиска пуста.")
-            return
-
-        lines = [
-            f"{r.timestamp.strftime('%Y-%m-%d %H:%M')} — @{escape(r.username or 'N/A')} — <code>{escape(r.query)}</code>"
-            for r in records
-        ]
-        await update.message.reply_text(
-            "📋 История поиска (последние 50):\n\n" + "\n".join(lines),
-            parse_mode="HTML"
-        )
-
+# --- unknown ---
 async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🤷‍♂️ Неизвестная команда. Нажмите /start")
 
 # -------------------------------------------------
+# Conversation-обработчики для add/edit/del
+# -------------------------------------------------
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ Действие отменено.")
+    context.user_data.clear()
+    return ConversationHandler.END
+
+conv_add = ConversationHandler(
+    entry_points=[CommandHandler("add", add_start)],
+    states={
+        ADD_KEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_key)],
+        ADD_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_desc)]
+    },
+    fallbacks=[CommandHandler("cancel", cancel)]
+)
+
+conv_edit = ConversationHandler(
+    entry_points=[CommandHandler("edit", edit_start)],
+    states={
+        EDIT_KEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u, c: edit_key(u, c))],
+        EDIT_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u, c: edit_desc(u, c))]
+    },
+    fallbacks=[CommandHandler("cancel", cancel)]
+)
+
+conv_del = ConversationHandler(
+    entry_points=[CommandHandler("del", del_start)],
+    states={
+        DELETE_KEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u, c: del_key(u, c))]
+    },
+    fallbacks=[CommandHandler("cancel", cancel)]
+)
+
+# -------------------------------------------------
+# /list + inline-кнопки
+# -------------------------------------------------
+async def list_entries(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if not DATA:
+        await update.message.reply_text("📭 База пуста.")
+        return
+
+    keyboard = []
+    for key in sorted(DATA):
+        keyboard.append([
+            InlineKeyboardButton(f"✏️ {key}", callback_data=f"e_{key}"),
+            InlineKeyboardButton(f"🗑️ {key}", callback_data=f"d_{key}")
+        ])
+    await update.message.reply_text(
+        "📋 Выберите запись:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+async def list_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    cmd, key = query.data.split("_", 1)
+
+    if cmd == "e":
+        context.user_data["edit_key"] = key
+        await query.edit_message_text(
+            f"📝 Текущее описание:\n{DATA[key]}\n\nОтправь новое описание:"
+        )
+        return EDIT_DESC
+    elif cmd == "d":
+        del DATA[key]
+        rewrite_data_docx()
+        await query.edit_message_text(f"✅ Удалено: <b>{key}</b>", parse_mode="HTML")
+
+# -------------------------------------------------
 # Запуск
 # -------------------------------------------------
+async def post_init(app: Application):
+    commands = [
+        BotCommand("start", "Начать работу"),
+        BotCommand("add", "Добавить запись"),
+        BotCommand("edit", "Изменить запись"),
+        BotCommand("del", "Удалить запись"),
+        BotCommand("list", "Список записей"),
+        BotCommand("history", "История поиска"),
+        BotCommand("stats", "Статистика"),
+        BotCommand("users", "Список пользователей"),
+        BotCommand("cancel", "Отменить текущее действие")
+    ]
+    await app.bot.set_my_commands(commands)
+
 def main():
-    keep_alive()  # запускаем Flask-пингер
-    application = Application.builder().token(BOT_TOKEN).build()
+    keep_alive()
+    application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("users", users_command))
     application.add_handler(CommandHandler("history", history_command))
+    application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("list", list_entries))
+    application.add_handler(conv_add)
+    application.add_handler(conv_edit)
+    application.add_handler(conv_del)
     application.add_handler(CallbackQueryHandler(approve_callback, pattern="^approve_"))
     application.add_handler(CallbackQueryHandler(toggle_user_status, pattern="^toggle_"))
+    application.add_handler(CallbackQueryHandler(list_button, pattern="^[ed]_"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_handler(MessageHandler(filters.COMMAND, unknown))
 
-    logger.info("✅ Бот запущен на Replit")
+    logger.info("✅ Бот запущен")
     application.run_polling()
 
 if __name__ == "__main__":
