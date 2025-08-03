@@ -577,7 +577,7 @@ def main():
 
     # админские
     application.add_handler(CommandHandler("adduser", adduser, filters=filters.User(user_id=ADMIN_ID)))
-    application.add_handler(CommandHandler("addusers", addusers, filters=filters.User(user_id=ADMIN_ID) & filters.Regex(r"^/addusers( .+)?$")))
+    application.add_handler(CommandHandler("addusers", addusers, filters=filters.User(user_id=ADMIN_ID)))
     application.add_handler(CommandHandler("users", users_command, filters=filters.User(user_id=ADMIN_ID)))
     application.add_handler(CommandHandler("history", history_command, filters=filters.User(user_id=ADMIN_ID)))
     application.add_handler(CommandHandler("stats", stats_command, filters=filters.User(user_id=ADMIN_ID)))
