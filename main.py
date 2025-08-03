@@ -529,7 +529,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Произошла ошибка, попробуйте позже.")
 
 async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🤷‍♂️ Неизвестная команда. Нажмите /start")
+    await update.message.reply_text("🤷‍♂️ Ну ну ну, разогнался... Нажми /start")
 
 # ---------- HANDLERS ----------
 conv_add = ConversationHandler(
