@@ -3,6 +3,7 @@ import os
 import logging
 import datetime
 import hashlib
+import asyncio
 from pathlib import Path
 
 from docx import Document
@@ -169,7 +170,7 @@ async def add_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     desc = update.message.text.strip()
     DATA[key] = desc
     rewrite_data_docx()
-    reload_data_and_notify_if_new(context.application)
+    _notify_all_approved(context.application, [key])
     await update.message.reply_text(f"✅ Добавлено:\n<b>{key}</b>\n{desc}", parse_mode="HTML")
     context.user_data.clear()
     return ConversationHandler.END
@@ -195,7 +196,7 @@ async def edit_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
     desc = update.message.text.strip()
     DATA[key] = desc
     rewrite_data_docx()
-    reload_data_and_notify_if_new(context.application)
+    _notify_all_approved(context.application, [key])
     await update.message.reply_text(f"✅ Обновлено:\n<b>{key}</b>\n{desc}", parse_mode="HTML")
     context.user_data.clear()
     return ConversationHandler.END
@@ -214,7 +215,7 @@ async def del_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     del DATA[key]
     rewrite_data_docx()
-    reload_data_and_notify_if_new(context.application)
+    _notify_all_approved(context.application, [key])
     await update.message.reply_text(f"✅ Удалено: <b>{key}</b>", parse_mode="HTML")
     return ConversationHandler.END
 
@@ -247,13 +248,15 @@ async def broadcast_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     with SessionLocal() as session:
         users = session.query(UserRecord).filter_by(status="approved").all()
+
     sent = 0
     for user in users:
         try:
-            context.bot.send_message(chat_id=user.user_id, text=text, parse_mode="HTML")
+            await context.bot.send_message(chat_id=user.user_id, text=text, parse_mode="HTML")
             sent += 1
+            await asyncio.sleep(0.1)  # избегаем rate limit
         except Exception as e:
-            logger.warning(f"Не удалось отправить {user.user_id}: {e}")
+            logger.warning(f"Не дошло до {user.user_id}: {e}")
     await update.message.reply_text(f"✅ Рассылка завершена. Отправлено: {sent}")
     return ConversationHandler.END
 
@@ -467,7 +470,7 @@ async def list_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif cmd == "d":
         del DATA[key]
         rewrite_data_docx()
-        reload_data_and_notify_if_new(context.application)
+        _notify_all_approved(context.application, [key])
         await query.edit_message_text(f"✅ Удалено: <b>{key}</b>", parse_mode="HTML")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
