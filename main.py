@@ -42,7 +42,7 @@ if not BOT_TOKEN or not ADMIN_ID:
     raise RuntimeError("Укажите BOT_TOKEN и ADMIN_ID в Secrets")
 
 # ---------- БАЗА ДАННЫХ ----------
-DB_URL = "sqlite:///users.db"
+DB_URL = "sqlite:///data/users.db"
 engine = create_engine(DB_URL, echo=False, pool_pre_ping=True)
 Base = declarative_base()
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
@@ -256,7 +256,7 @@ async def broadcast_send(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Рассылка завершена. Отправлено: {sent}")
     return ConversationHandler.END
 
-# ---------- РУЧНОЕ ДОБАВЛЕНИЕ ПОЛЬЗОВАТЕЛЯ ----------
+# ---------- РУЧНОЕ ДОБАВЛЕНИЕ ОДНОГО ПОЛЬЗОВАТЕЛЯ ----------
 async def adduser(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -277,6 +277,33 @@ async def adduser(update: Update, context: ContextTypes.DEFAULT_TYPE):
         session.commit()
     await update.message.reply_text(f"✅ Пользователь {user_id} добавлен и одобрен.")
 
+# ---------- ДОБАВЛЕНИЕ НЕСКОЛЬКИХ ПОЛЬЗОВАТЕЛЕЙ ----------
+async def addusers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if not context.args:
+        await update.message.reply_text("❌ Используй: /addusers <id1> <id2> ...")
+        return
+
+    added = []
+    with SessionLocal() as session:
+        for arg in context.args:
+            try:
+                uid = int(arg.strip())
+            except ValueError:
+                continue
+            user = session.query(UserRecord).filter_by(user_id=uid).first()
+            if user:
+                user.status = "approved"
+            else:
+                session.add(UserRecord(user_id=uid, username="N/A", status="approved"))
+            added.append(str(uid))
+        session.commit()
+
+    await update.message.reply_text(
+        f"✅ Добавлено и одобрено: {', '.join(added)}"
+    )
+
 # ---------- КОМАНДЫ ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -285,7 +312,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if record and record.status == "approved":
             await update.message.reply_text(
                 "✅ Добро пожаловать!\n\nОтправьте любое слово для поиска. "
-                "В Библиотеке можно найти экстремистов, террористов и других лиц, связанных с экстремизмом и терроризмом, "
+                "В кладовке можно найти экстремистов, террористов и других лиц, связанных с экстремизмом и терроризмом, "
                 "в том числе запрещённых проповедников и организаций. "
                 "Также можно найти запрещённые НС, СЯ и ЯВ. "
                 "Поиск осуществляется как по одному-двум словам, так и по его части; "
@@ -526,6 +553,7 @@ async def post_init(app: Application):
     if ADMIN_ID:
         commands.extend([
             BotCommand("adduser", "Добавить/восстановить пользователя по id"),
+            BotCommand("addusers", "Добавить и одобрить нескольких по id"),
             BotCommand("add", "Добавить запись"),
             BotCommand("edit", "Изменить запись"),
             BotCommand("del", "Удалить запись"),
@@ -545,13 +573,14 @@ def main():
     # общедоступные
     application.add_handler(CommandHandler("start", start))
     application.add_handler(conv_feedback)
-    application.add_handler(CommandHandler("adduser", adduser, filters=filters.User(user_id=ADMIN_ID)))
 
     # админские
+    application.add_handler(CommandHandler("adduser", adduser, filters=filters.User(user_id=ADMIN_ID)))
+    application.add_handler(CommandHandler("addusers", addusers, filters=filters.User(user_id=ADMIN_ID)))
     application.add_handler(CommandHandler("users", users_command, filters=filters.User(user_id=ADMIN_ID)))
     application.add_handler(CommandHandler("history", history_command, filters=filters.User(user_id=ADMIN_ID)))
     application.add_handler(CommandHandler("stats", stats_command, filters=filters.User(user_id=ADMIN_ID)))
-    application.add_handler(CommandHandler("list", list_entries, filters=filters.User(user_id=ADMIN_ID)))
+    application.add_handler(CommandCommand("list", list_entries, filters=filters.User(user_id=ADMIN_ID)))
     application.add_handler(conv_add)
     application.add_handler(conv_edit)
     application.add_handler(conv_del)
