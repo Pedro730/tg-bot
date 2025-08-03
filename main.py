@@ -42,7 +42,8 @@ if not BOT_TOKEN or not ADMIN_ID:
     raise RuntimeError("Укажите BOT_TOKEN и ADMIN_ID в Secrets")
 
 # ---------- БАЗА ДАННЫХ ----------
-DB_URL = "sqlite:///data/users.db"
+Path("data").mkdir(exist_ok=True)
+DB_URL = f"sqlite:///{Path.cwd() / 'data' / 'users.db'}"
 engine = create_engine(DB_URL, echo=False, pool_pre_ping=True)
 Base = declarative_base()
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
