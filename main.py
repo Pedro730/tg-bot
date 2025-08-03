@@ -2,7 +2,7 @@
 import os
 import logging
 import datetime
-import random
+import base64
 from pathlib import Path
 
 from docx import Document
@@ -39,6 +39,7 @@ def keep_alive():
 # -------------------------------------------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", 0))
+KIMI_API_KEY = os.getenv("KIMI_API_KEY")  # <-- для будущего фото-анализа (можно оставить пустым)
 
 if not BOT_TOKEN or not ADMIN_ID:
     raise RuntimeError("Укажите BOT_TOKEN и ADMIN_ID в Secrets")
@@ -135,133 +136,111 @@ def is_approved(user_id: int) -> bool:
 ADD_KEY, ADD_DESC, EDIT_KEY, EDIT_DESC, DELETE_KEY = range(5)
 
 # -------------------------------------------------
-# Хэндлеры
+# Conversation-функции
 # -------------------------------------------------
-# --- /start ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    with SessionLocal() as session:
-        record = session.query(UserRecord).filter_by(user_id=user.id).first()
-        if record and record.status == "approved":
-            await update.message.reply_text(
-                "✅ Добро пожаловать!\n\nОтправьте любое слово для поиска. "
-                "В Библиотеке можно найти экстремистов, террористов и других лиц, связанных с экстремизмом и терроризмом, "
-                "в том числе запрещённых проповедников и организаций. "
-                "Также можно найти запрещённые НС, СЯ и ЯВ. "
-                "Поиск осуществляется как по одному-двум словам, так и по его части; "
-                "выдаётся 7 наиболее подходящих совпадений, удачи тебе в поисках."
-            )
-            return
-        if record and record.status == "blocked":
-            await update.message.reply_text("❌ Вам отказано в доступе.")
-            return
+async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Нет доступа.")
+        return ConversationHandler.END
+    await update.message.reply_text("🔑 Отправь ключевое слово:")
+    return ADD_KEY
 
-        if not record:
-            session.add(
-                UserRecord(user_id=user.id, username=user.username or "N/A")
-            )
-            session.commit()
+async def add_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["add_key"] = update.message.text.strip().lower()
+    await update.message.reply_text("📝 Отправь описание:")
+    return ADD_DESC
 
-            keyboard = [[InlineKeyboardButton("Одобрить", callback_data=f"approve_{user.id}")]]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            await context.bot.send_message(
-                chat_id=ADMIN_ID,
-                text=f"📬 Новая заявка:\n"
-                     f"ID: {user.id}\n"
-                     f"Имя: {user.full_name}\n"
-                     f"Username: @{user.username or '—'}",
-                reply_markup=reply_markup
-            )
+async def add_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    key, desc = context.user_data["add_key"], update.message.text.strip()
+    DATA[key] = desc
+    rewrite_data_docx()
+    await update.message.reply_text(f"✅ Добавлено:\n<b>{key}</b>\n{desc}", parse_mode="HTML")
+    context.user_data.clear()
+    return ConversationHandler.END
 
-        await update.message.reply_text("📨 Ваша заявка отправлена администратору.")
+async def edit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Нет доступа.")
+        return ConversationHandler.END
+    await update.message.reply_text("🔑 Отправь ключевое слово для редактирования:")
+    return EDIT_KEY
 
-# --- approve callback ---
-async def approve_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+async def edit_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    key = update.message.text.strip().lower()
+    if key not in DATA:
+        await update.message.reply_text("❌ Запись не найдена.")
+        return ConversationHandler.END
+    context.user_data["edit_key"] = key
+    await update.message.reply_text(f"📝 Текущее описание:\n{DATA[key]}\n\nОтправь новое описание:")
+    return EDIT_DESC
 
-    if query.from_user.id != ADMIN_ID:
-        return
+async def edit_desc(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    key, desc = context.user_data["edit_key"], update.message.text.strip()
+    DATA[key] = desc
+    rewrite_data_docx()
+    await update.message.reply_text(f"✅ Обновлено:\n<b>{key}</b>\n{desc}", parse_mode="HTML")
+    context.user_data.clear()
+    return ConversationHandler.END
 
-    user_id = int(query.data.split("_")[1])
-    with SessionLocal() as session:
-        record = session.query(UserRecord).filter_by(user_id=user_id).first()
-        if not record:
-            await query.edit_message_text("❌ Пользователь не найден")
-            return
-        record.status = "approved"
-        session.commit()
+async def del_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("❌ Нет доступа.")
+        return ConversationHandler.END
+    await update.message.reply_text("🗑 Отправь ключевое слово для удаления:")
+    return DELETE_KEY
 
-        await query.edit_message_text("✅ Пользователь одобрен")
-        try:
-            await context.bot.send_message(
-                chat_id=user_id,
-                text="✅ Ваша заявка одобрена! Нажмите /start, чтобы начать."
-            )
-        except Exception as e:
-            logger.warning(f"Не удалось уведомить пользователя {user_id}: {e}")
+async def del_key(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    key = update.message.text.strip().lower()
+    if key not in DATA:
+        await update.message.reply_text("❌ Запись не найдена.")
+        return ConversationHandler.END
+    del DATA[key]
+    rewrite_data_docx()
+    await update.message.reply_text(f"✅ Удалено: <b>{key}</b>", parse_mode="HTML")
+    return ConversationHandler.END
 
-# --- /users ---
-async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ Действие отменено.")
+    context.user_data.clear()
+    return ConversationHandler.END
+
+# -------------------------------------------------
+# Команды
+# -------------------------------------------------
+async def list_entries(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
-
-    with SessionLocal() as session:
-        records = session.query(UserRecord).all()
-        if not records:
-            await update.message.reply_text("📝 Нет зарегистрированных пользователей.")
-            return
-
-        lines, keyboard = [], []
-        for r in records:
-            status = "✅" if r.status == "approved" else ("❌" if r.status == "blocked" else "⏳")
-            lines.append(f"{status} <b>{r.user_id}</b> — {escape(r.username or 'N/A')}")
-            keyboard.append([
-                InlineKeyboardButton(
-                    f"{'Заблокать' if r.status == 'approved' else 'Одобрить'} {r.user_id}",
-                    callback_data=f"toggle_{r.user_id}"
-                )
-            ])
-
-        await update.message.reply_text(
-            "📋 Список пользователей:\n\n" + "\n".join(lines),
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-# --- toggle user status ---
-async def toggle_user_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    if query.from_user.id != ADMIN_ID:
+    if not DATA:
+        await update.message.reply_text("📭 База пуста.")
         return
 
-    user_id = int(query.data.split("_")[1])
-    with SessionLocal() as session:
-        record = session.query(UserRecord).filter_by(user_id=user_id).first()
-        if not record:
-            await query.edit_message_text("❌ Пользователь не найден.")
-            return
+    keyboard = []
+    for key in sorted(DATA):
+        keyboard.append([
+            InlineKeyboardButton(f"✏️ {key}", callback_data=f"e_{key}"),
+            InlineKeyboardButton(f"🗑️ {key}", callback_data=f"d_{key}")
+        ])
+    await update.message.reply_text(
+        "📋 Выберите запись:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
-        old_status = record.status
-        if old_status == "approved":
-            record.status = "blocked"
-            status_text = "🔒 Пользователь заблокирован"
-            notify_text = "❌ Ваш доступ отозван."
-        else:
-            record.status = "approved"
-            status_text = "✅ Пользователь одобрен"
-            notify_text = "✅ Ваша заявка одобрена!"
+async def list_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    cmd, key = query.data.split("_", 1)
 
-        session.commit()
-        await query.edit_message_text(status_text)
-        try:
-            await context.bot.send_message(chat_id=user_id, text=notify_text)
-        except Exception as e:
-            logger.warning(f"Не удалось уведомить пользователя {user_id}: {e}")
+    if cmd == "e":
+        context.user_data["edit_key"] = key
+        await query.edit_message_text(
+            f"📝 Текущее описание:\n{DATA[key]}\n\nОтправь новое описание:"
+        )
+        return EDIT_DESC
+    elif cmd == "d":
+        del DATA[key]
+        rewrite_data_docx()
+        await query.edit_message_text(f"✅ Удалено: <b>{key}</b>", parse_mode="HTML")
 
-# --- /history ---
 async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -281,7 +260,6 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="HTML"
         )
 
-# --- /stats ---
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         return
@@ -302,7 +280,9 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📅 За сегодня: {today_searches}"
     )
 
-# --- handle_message ---
+# -------------------------------------------------
+# Хэндлеры сообщений и фото
+# -------------------------------------------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         if not is_approved(update.effective_user.id):
@@ -341,80 +321,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Ошибка в handle_message: %s", e)
         await update.message.reply_text("⚠️ Произошла ошибка, попробуйте позже.")
 
-# --- unknown ---
 async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🤷‍♂️ Неизвестная команда. Нажмите /start")
-
-# -------------------------------------------------
-# Conversation-обработчики для add/edit/del
-# -------------------------------------------------
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Действие отменено.")
-    context.user_data.clear()
-    return ConversationHandler.END
-
-conv_add = ConversationHandler(
-    entry_points=[CommandHandler("add", add_start)],
-    states={
-        ADD_KEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_key)],
-        ADD_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_desc)]
-    },
-    fallbacks=[CommandHandler("cancel", cancel)]
-)
-
-conv_edit = ConversationHandler(
-    entry_points=[CommandHandler("edit", edit_start)],
-    states={
-        EDIT_KEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u, c: edit_key(u, c))],
-        EDIT_DESC: [MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u, c: edit_desc(u, c))]
-    },
-    fallbacks=[CommandHandler("cancel", cancel)]
-)
-
-conv_del = ConversationHandler(
-    entry_points=[CommandHandler("del", del_start)],
-    states={
-        DELETE_KEY: [MessageHandler(filters.TEXT & ~filters.COMMAND, lambda u, c: del_key(u, c))]
-    },
-    fallbacks=[CommandHandler("cancel", cancel)]
-)
-
-# -------------------------------------------------
-# /list + inline-кнопки
-# -------------------------------------------------
-async def list_entries(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    if not DATA:
-        await update.message.reply_text("📭 База пуста.")
-        return
-
-    keyboard = []
-    for key in sorted(DATA):
-        keyboard.append([
-            InlineKeyboardButton(f"✏️ {key}", callback_data=f"e_{key}"),
-            InlineKeyboardButton(f"🗑️ {key}", callback_data=f"d_{key}")
-        ])
-    await update.message.reply_text(
-        "📋 Выберите запись:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-async def list_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    cmd, key = query.data.split("_", 1)
-
-    if cmd == "e":
-        context.user_data["edit_key"] = key
-        await query.edit_message_text(
-            f"📝 Текущее описание:\n{DATA[key]}\n\nОтправь новое описание:"
-        )
-        return EDIT_DESC
-    elif cmd == "d":
-        del DATA[key]
-        rewrite_data_docx()
-        await query.edit_message_text(f"✅ Удалено: <b>{key}</b>", parse_mode="HTML")
 
 # -------------------------------------------------
 # Запуск
