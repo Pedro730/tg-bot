@@ -58,6 +58,14 @@ class UserRecord(Base):
     status = Column(String, default="pending")
     requested_at = Column(DateTime, default=datetime.datetime.utcnow)
 
+class SearchHistory(Base):
+    __tablename__ = "search_history"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, nullable=False)
+    username = Column(String)
+    query = Column(String, nullable=False)
+    timestamp = Column(DateTime, default=datetime.datetime.utcnow)
+
 Base.metadata.create_all(bind=engine)
 
 # -------------------------------------------------
@@ -123,7 +131,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if record and record.status == "approved":
             await update.message.reply_text(
                 "✅ Добро пожаловать!\n\nОтправьте любое слово для поиска. "
-                "В кладовке можно найти экстремистов, террористов и других лиц, связанных с экстремизмом и терроризмом, "
+                "В Библиотеке можно найти экстремистов, террористов и других лиц, связанных с экстремизмом и терроризмом, "
                 "в том числе запрещённых проповедников и организаций. "
                 "Также можно найти запрещённые НС, СЯ и ЯВ. "
                 "Поиск осуществляется как по одному-двум словам, так и по его части; "
@@ -247,6 +255,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("🔍 Пустой запрос.")
             return
 
+        # -------------- Логируем запрос --------------
+        with SessionLocal() as session:
+            session.add(SearchHistory(
+                user_id=update.effective_user.id,
+                username=update.effective_user.username or "N/A",
+                query=query
+            ))
+            session.commit()
+        # ---------------------------------------------
+
         matches = [
             (k, v) for k, v in DATA.items()
             if query in k or k in query
@@ -266,6 +284,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception("Ошибка в handle_message: %s", e)
         await update.message.reply_text("⚠️ Произошла ошибка, попробуйте позже.")
 
+async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    with SessionLocal() as session:
+        records = session.query(SearchHistory).order_by(SearchHistory.timestamp.desc()).limit(50).all()
+        if not records:
+            await update.message.reply_text("📭 История поиска пуста.")
+            return
+
+        lines = [
+            f"{r.timestamp.strftime('%Y-%m-%d %H:%M')} — @{escape(r.username or 'N/A')} — <code>{escape(r.query)}</code>"
+            for r in records
+        ]
+        await update.message.reply_text(
+            "📋 История поиска (последние 50):\n\n" + "\n".join(lines),
+            parse_mode="HTML"
+        )
+
 async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🤷‍♂️ Неизвестная команда. Нажмите /start")
 
@@ -278,6 +315,7 @@ def main():
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("users", users_command))
+    application.add_handler(CommandHandler("history", history_command))
     application.add_handler(CallbackQueryHandler(approve_callback, pattern="^approve_"))
     application.add_handler(CallbackQueryHandler(toggle_user_status, pattern="^toggle_"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
